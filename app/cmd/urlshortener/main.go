@@ -3,15 +3,24 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"urlshortener/internal/storage"
 	"urlshortener/pkg/shortener"
 )
 
 func main() {
-	shortener := shortener.New()
+	ctx := context.Background()
+	db, err := storage.New(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	shortener := shortener.New(db)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /shorten", shortener.ShortenHandler)

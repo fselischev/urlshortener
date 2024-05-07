@@ -1,11 +1,12 @@
 package shortener
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"math/rand"
 	"net/http"
-	"sync"
+	"urlshortener/internal/storage"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -14,12 +15,10 @@ import (
 type URLShortener struct {
 	l *zap.SugaredLogger
 
-	mu     sync.Mutex
-	keyURL map[string]string
-	URLkey map[string]string
+	db *storage.Storage
 }
 
-func New() *URLShortener {
+func New(db *storage.Storage) *URLShortener {
 	zapConfig := zap.NewDevelopmentConfig()
 	zapConfig.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
 	zapConfig.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
@@ -33,9 +32,8 @@ func New() *URLShortener {
 	defer func() { _ = l.Sync() }()
 
 	return &URLShortener{
-		l:      l.Sugar().Named("UrlShortener"),
-		keyURL: make(map[string]string),
-		URLkey: make(map[string]string),
+		l:  l.Sugar().Named("UrlShortener"),
+		db: db,
 	}
 }
 
@@ -54,17 +52,25 @@ func (us *URLShortener) ShortenHandler(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 	}()
 
+	ctx := context.Background()
 	url := requestData.URL
 
-	key := generateRandomKey()
-	us.mu.Lock()
-	if k, ok := us.URLkey[url]; ok {
-		key = k
-	} else {
-		us.keyURL[key] = url
-		us.URLkey[url] = key
+	key, err := us.db.GetKey(ctx, url)
+	if key != "" && err != nil {
+		us.l.Errorf("cannot get key in db: %v", err)
+
+		http.Error(w, "key not found", http.StatusNotFound)
+		return
 	}
-	us.mu.Unlock()
+
+	if key == "" {
+		key = generateRandomKey()
+		if err := us.db.Insert(ctx, url, key); err != nil {
+			us.l.Errorf("cannot insert in db: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(
@@ -82,12 +88,10 @@ func (us *URLShortener) ShortenHandler(w http.ResponseWriter, r *http.Request) {
 
 func (us *URLShortener) GoHandler(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Path[len("/go/"):]
-	us.mu.Lock()
-	url, ok := us.keyURL[key]
-	us.mu.Unlock()
-
-	if !ok {
-		us.l.Errorf("key %v not found", key)
+	ctx := context.Background()
+	url, err := us.db.GetURL(ctx, key)
+	if err != nil {
+		us.l.Errorf("cannot get url from db: %v", err)
 		http.Error(w, "key not found", http.StatusNotFound)
 		return
 	}
