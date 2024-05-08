@@ -3,3 +3,5 @@ run:
 
 down:
 	docker compose down
+
+reload: down run
